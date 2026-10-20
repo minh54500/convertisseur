@@ -1,33 +1,81 @@
 #!/bin/zsh
-# Construit Convertisseur.app (moteur Python embarqué), l'installe dans ~/Applications
-# et ajoute les actions rapides du Finder.
+# ./build.sh            construit l'app pour ce Mac et l'installe dans ~/Applications (+ actions rapides)
+# ./build.sh --release  construit build/Convertisseur-arm64.zip et build/Convertisseur-x86_64.zip
+#
+# L'app embarque son propre Python (python-build-standalone) : rien à installer chez l'utilisateur.
+# Seul ce script a besoin des outils de développement Apple (swiftc).
 set -euo pipefail
 cd "${0:A:h}"
 
-APP=build/Convertisseur.app
-RES=$APP/Contents/Resources
+VERSION=$(<VERSION)
 BUNDLE_ID=io.github.minh54500.convertisseur
+PY_TAG=20261013
+PY_VER=3.12.15
+CACHE=build-cache
+mkdir -p $CACHE
 
-if [[ ! -x .venv/bin/python3 ]]; then
-  echo "→ Installation du moteur Python…"
-  /usr/bin/python3 -m venv .venv
-  .venv/bin/pip install -q --upgrade pip
+python_archive() {  # $1 = aarch64 | x86_64
+  local name="cpython-$PY_VER+$PY_TAG-$1-apple-darwin-install_only.tar.gz"
+  if [[ ! -f $CACHE/$name ]]; then
+    echo "→ Téléchargement de Python ($1)…" >&2
+    curl -fL --progress-bar -o $CACHE/$name.part \
+      "https://github.com/astral-sh/python-build-standalone/releases/download/$PY_TAG/${name//+/%2B}"
+    mv $CACHE/$name.part $CACHE/$name
+  fi
+  print $CACHE/$name
+}
+
+# Python de cette machine, pour lancer pip et pré-compiler le code.
+HOST_ARCH=$(uname -m); [[ $(sysctl -n hw.optional.arm64 2>/dev/null) == 1 ]] && HOST_ARCH=arm64
+if [[ ! -x $CACHE/host/python/bin/python3 ]]; then
+  mkdir -p $CACHE/host
+  tar xzf $(python_archive ${HOST_ARCH/arm64/aarch64}) -C $CACHE/host
 fi
-.venv/bin/pip install -q -r requirements.txt
+HOST_PY=$CACHE/host/python/bin/python3
 
-echo "→ Compilation de l'app…"
-rm -rf build && mkdir -p $APP/Contents/MacOS $RES
-swiftc -O -parse-as-library -swift-version 5 app/Convertisseur.swift -o $APP/Contents/MacOS/Convertisseur 2>&1 | grep -E "error" || true
-[[ -x $APP/Contents/MacOS/Convertisseur ]] || { echo "✗ La compilation a échoué"; exit 1; }
+build_app() {  # $1 = arm64 | x86_64
+  local arch=$1 app=build/$1/Convertisseur.app
+  local res=$app/Contents/Resources
+  local platforms=(--platform macosx_11_0_arm64)
+  [[ $arch == x86_64 ]] && platforms=(--platform macosx_10_15_x86_64 --platform macosx_10_13_x86_64 --platform macosx_10_9_x86_64)
 
-swift app/make-icon.swift build/Convertisseur.iconset
-iconutil -c icns build/Convertisseur.iconset -o $RES/Convertisseur.icns
+  echo "→ Construction pour $arch…"
+  rm -rf build/$arch && mkdir -p $app/Contents/MacOS $res
 
-cp convert.py $RES/
-cp -R .venv $RES/venv
-find $RES/venv -name __pycache__ -prune -exec rm -rf {} +
+  swiftc -O -parse-as-library -swift-version 5 -target $arch-apple-macos14 \
+    app/Convertisseur.swift -o $app/Contents/MacOS/Convertisseur 2>&1 | grep -E "error" || true
+  [[ -x $app/Contents/MacOS/Convertisseur ]] || { echo "✗ La compilation a échoué"; exit 1; }
 
-cat > $APP/Contents/Info.plist <<EOF
+  # Python autonome + bibliothèques
+  tar xzf $(python_archive ${arch/arm64/aarch64}) -C $res
+  local lib=$res/python/lib/python3.12
+  $HOST_PY -m pip install -q --disable-pip-version-check --no-compile --only-binary=:all: \
+    --python-version 3.12 --implementation cp $platforms --target $lib/site-packages -r requirements.txt
+
+  # Allègement : tout ce qui ne sert pas au moteur
+  rm -rf $res/python/include $res/python/share $res/python/lib/{tcl,tk,itcl,thread}*(N) \
+         $lib/{test,idlelib,tkinter,turtledemo,ensurepip,lib2to3,pydoc_data} \
+         $lib/lib-dynload/_tkinter*(N) $lib/site-packages/pip*(N)
+  find $res/python -name __pycache__ -prune -exec rm -rf {} +
+  # Bytecode pré-compilé (sans vérification de date) : rien n'est écrit dans l'app au lancement.
+  $HOST_PY -m compileall -q -j 0 --invalidation-mode unchecked-hash $lib >/dev/null || true
+
+  cp convert.py $res/
+  cp build/Convertisseur.icns $res/
+
+  # Actions rapides, générées depuis le modèle ; l'app les installe au premier lancement.
+  mkdir -p $res/services
+  for script in quick-action/*.sh(N); do
+    local name=${script:t:r}
+    [[ $name == common ]] && continue
+    local wf=$res/services/$name.workflow
+    cp -R quick-action/template.workflow $wf
+    plutil -replace NSServices.0.NSMenuItem.default -string "$name" $wf/Contents/Info.plist
+    plutil -replace actions.0.action.ActionParameters.COMMAND_STRING \
+      -string "$(sed "s/BUNDLE_ID/$BUNDLE_ID/g" quick-action/common.sh; cat $script)" $wf/Contents/document.wflow
+  done
+
+  cat > $app/Contents/Info.plist <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -37,8 +85,8 @@ cat > $APP/Contents/Info.plist <<EOF
   <key>CFBundleExecutable</key><string>Convertisseur</string>
   <key>CFBundleIconFile</key><string>Convertisseur</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleShortVersionString</key><string>1.1</string>
-  <key>CFBundleVersion</key><string>2</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
+  <key>CFBundleVersion</key><string>$VERSION</string>
   <key>LSMinimumSystemVersion</key><string>14.0</string>
   <key>NSHighResolutionCapable</key><true/>
   <key>CFBundleDocumentTypes</key><array><dict>
@@ -50,35 +98,27 @@ cat > $APP/Contents/Info.plist <<EOF
 </dict></plist>
 EOF
 
-codesign --force --deep -s - $APP 2>/dev/null || true
+  codesign --force --deep -s - $app 2>/dev/null || true
+}
 
+mkdir -p build
+swift app/make-icon.swift build/Convertisseur.iconset
+iconutil -c icns build/Convertisseur.iconset -o build/Convertisseur.icns
+
+if [[ ${1:-} == --release ]]; then
+  for arch in arm64 x86_64; do
+    build_app $arch
+    rm -f build/Convertisseur-$arch.zip
+    ditto -c -k --keepParent build/$arch/Convertisseur.app build/Convertisseur-$arch.zip
+    echo "✓ build/Convertisseur-$arch.zip ($(du -h build/Convertisseur-$arch.zip | cut -f1))"
+  done
+  exit 0
+fi
+
+build_app $HOST_ARCH
+osascript -e 'quit app "Convertisseur"' 2>/dev/null || true
 mkdir -p ~/Applications
 rm -rf ~/Applications/Convertisseur.app
-cp -R $APP ~/Applications/
-echo "✓ App installée : ~/Applications/Convertisseur.app"
-
-# --- Actions rapides (clic droit dans le Finder), générées depuis le modèle
-ENGINE='R="$HOME/Applications/Convertisseur.app/Contents/Resources"
-run() { "$R/venv/bin/python3" "$R/convert.py" "$@" 2>/dev/null; }
-notify() { osascript -e "on run a" -e "display notification (item 1 of a) with title \"Convertisseur\" sound name \"Glass\"" -e "end run" "$1"; }
-'
-add_action() {  # $1 = nom du menu, $2 = script
-  local wf=~/Library/Services/"$1.workflow"
-  rm -rf "$wf" && cp -R quick-action/template.workflow "$wf"
-  plutil -replace NSServices.0.NSMenuItem.default -string "$1" "$wf/Contents/Info.plist"
-  plutil -replace actions.0.action.ActionParameters.COMMAND_STRING -string "$ENGINE$2" "$wf/Contents/document.wflow"
-}
-mkdir -p ~/Library/Services
-
-add_action "Convertir en WebP" "q=\$(defaults read $BUNDLE_ID quality 2>/dev/null || echo 82)
-w=\$(defaults read $BUNDLE_ID maxWidth 2>/dev/null || echo 1600)
-out=\$(run --to webp -q \"\$q\" -w \"\$w\" \"\$@\")
-notify \"\${out##*\$'\n'}\""
-
-add_action "Fusionner en PDF" 'out=$(run --merge "${(@on)@}")
-notify "${out##*$'"'"'\n'"'"'}"
-dest=$(print -r -- "$out" | sed -n "s/^→ //p")
-[[ -f "$dest" ]] && open -R "$dest"'
-
-/System/Library/CoreServices/pbs -flush
-echo "✓ Actions rapides : clic droit → Actions rapides → Convertir en WebP / Fusionner en PDF"
+cp -R build/$HOST_ARCH/Convertisseur.app ~/Applications/
+defaults delete $BUNDLE_ID servicesVersion 2>/dev/null || true  # l'app réinstalle les actions rapides au lancement
+echo "✓ Installé : ~/Applications/Convertisseur.app (v$VERSION)"
