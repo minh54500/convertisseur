@@ -30,6 +30,12 @@ Ouvre **Convertisseur** (⌘Espace → « Convertisseur »), choisis un onglet, 
 - **Enregistrer** : par défaut, les résultats sont créés à côté des originaux. Tu peux aussi choisir un dossier.
 - **PDF protégés** : l'app demande le mot de passe. Le fichier créé n'est pas protégé.
 
+### Dans l'encoche
+
+Coche **« Zone de dépôt dans l'encoche »** en bas de la fenêtre. Ensuite, quand tu glisses un fichier vers le haut de l'écran, une bulle descend de l'encoche avec 4 cibles : **WebP**, **JPG**, **Fusionner** et **Compresser**. Lâche le fichier sur l'une d'elles : la conversion se lance, avec les réglages de l'app.
+
+L'app doit rester ouverte pour que la zone fonctionne. Tu peux fermer sa fenêtre, elle continue en arrière-plan. Coche aussi **« Ouvrir au démarrage »** : elle se lancera alors discrètement, sans fenêtre, à chaque démarrage du Mac. Sur un Mac sans encoche, la bulle apparaît en haut au centre de l'écran.
+
 ### Clic droit dans le Finder
 
 Sélectionne des fichiers ou un dossier, puis fais clic droit → **Actions rapides** :
@@ -58,6 +64,7 @@ curl -fsSL https://raw.githubusercontent.com/minh54500/convertisseur/main/uninst
 
 - `convert.py` : le moteur (PyMuPDF + Pillow + pillow-heif). Il marche aussi en ligne de commande, `--help` liste les options.
 - `app/Convertisseur.swift` : l'interface SwiftUI, qui lance le moteur et lit sa progression en JSON.
+- `app/Notch.swift` : la zone de dépôt sous l'encoche.
 - `quick-action/` : les scripts des actions rapides et le modèle Automator.
 - `build.sh` : compile l'app (il faut les outils de développement Apple) avec un Python autonome ([python-build-standalone](https://github.com/astral-sh/python-build-standalone)), puis l'installe dans `~/Applications`.
 - `build.sh --release` : produit les zip pour Apple Silicon et Intel.

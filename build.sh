@@ -43,7 +43,7 @@ build_app() {  # $1 = arm64 | x86_64
   rm -rf build/$arch && mkdir -p $app/Contents/MacOS $res
 
   swiftc -O -parse-as-library -swift-version 5 -target $arch-apple-macos14 \
-    app/Convertisseur.swift -o $app/Contents/MacOS/Convertisseur 2>&1 | grep -E "error" || true
+    app/*.swift -o $app/Contents/MacOS/Convertisseur 2>&1 | grep -E "error" || true
   [[ -x $app/Contents/MacOS/Convertisseur ]] || { echo "✗ La compilation a échoué"; exit 1; }
 
   # Python autonome + bibliothèques
@@ -102,7 +102,7 @@ EOF
 }
 
 mkdir -p build
-swift app/make-icon.swift build/Convertisseur.iconset
+swift make-icon.swift build/Convertisseur.iconset
 iconutil -c icns build/Convertisseur.iconset -o build/Convertisseur.icns
 
 if [[ ${1:-} == --release ]]; then

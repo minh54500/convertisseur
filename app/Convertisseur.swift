@@ -1,4 +1,5 @@
 import AppKit
+import ServiceManagement
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -55,12 +56,22 @@ final class Converter: ObservableObject {
         process?.terminate()
     }
 
-    private func arguments() -> [String]? {
+    /// Depuis la zone de l'encoche : action directe avec les réglages enregistrés.
+    func quick(_ urls: [URL], mode: Mode, format: String? = nil, onFinish: @escaping () -> Void) {
+        guard !running, let args = arguments(for: mode, format: format) else { return onFinish() }
+        // Pas de liste à réordonner ici : la fusion suit l'ordre des noms.
+        let urls = mode == .merge
+            ? urls.sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+            : urls
+        run(urls, args: args, onFinish: onFinish)
+    }
+
+    private func arguments(for mode: Mode? = nil, format: String? = nil) -> [String]? {
         let d = UserDefaults.standard
         var args: [String]
-        switch mode {
+        switch mode ?? self.mode {
         case .convert:
-            args = ["--to", d.string(forKey: "format") ?? "webp",
+            args = ["--to", format ?? d.string(forKey: "format") ?? "webp",
                     "-q", String(d.object(forKey: "quality") as? Int ?? 82),
                     "-w", String(d.object(forKey: "maxWidth") as? Int ?? 1600)]
         case .merge:
@@ -82,8 +93,8 @@ final class Converter: ObservableObject {
         return args
     }
 
-    func run(_ urls: [URL], args: [String], password: String? = nil) {
-        guard !running, !urls.isEmpty else { return }
+    func run(_ urls: [URL], args: [String], password: String? = nil, onFinish: (() -> Void)? = nil) {
+        guard !running, !urls.isEmpty else { onFinish?(); return }
         running = true; progress = 0; current = "Préparation…"
         result = nil; errors = []; created = []; output = nil; locked = []
         lastRun = (urls, args)
@@ -141,6 +152,7 @@ final class Converter: ObservableObject {
                 self.running = false
                 self.progress = 1
                 self.process = nil
+                defer { onFinish?() }
                 if process.terminationReason == .uncaughtSignal {
                     self.result = "Annulé"
                     return
@@ -252,7 +264,9 @@ struct ContentView: View {
     @AppStorage("splitExtract") private var splitExtract = false
     @AppStorage("splitPages") private var splitPages = ""
     @AppStorage("outDir") private var outDir = ""
+    @AppStorage("notchEnabled") private var notchEnabled = false
     @State private var hovering = false
+    @State private var openAtLogin = SMAppService.mainApp.status == .enabled
 
     private let widths = [(0, "Taille d'origine"), (2560, "2560 px"), (1920, "1920 px"),
                           (1600, "1600 px — web"), (1200, "1200 px"), (800, "800 px")]
@@ -272,6 +286,8 @@ struct ContentView: View {
             if converter.mode == .merge { mergePanel }
             settings
             status
+            Divider()
+            footer
         }
         .padding(22)
         .frame(width: 480)
@@ -426,6 +442,27 @@ struct ContentView: View {
         .disabled(converter.running)
     }
 
+    private var footer: some View {
+        HStack {
+            Toggle("Zone de dépôt dans l'encoche", isOn: Binding(get: { notchEnabled }, set: {
+                notchEnabled = $0
+                $0 ? NotchDrop.shared.start() : NotchDrop.shared.stop()
+            }))
+            .help("Glisse un fichier vers le haut de l'écran : une zone apparaît sous l'encoche")
+            Spacer()
+            Toggle("Ouvrir au démarrage", isOn: Binding(get: { openAtLogin }, set: { on in
+                do {
+                    try on ? SMAppService.mainApp.register() : SMAppService.mainApp.unregister()
+                    openAtLogin = on
+                } catch {
+                    converter.result = "Impossible de changer l'ouverture au démarrage : \(error.localizedDescription)"
+                }
+            }))
+        }
+        .toggleStyle(.checkbox)
+        .font(.callout)
+    }
+
     // MARK: État
 
     @ViewBuilder private var status: some View {
@@ -484,15 +521,24 @@ struct ContentView: View {
 
 final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        let atLogin = event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
         Task { @MainActor in
             Converter.shared.installQuickActions()
             Converter.shared.checkForUpdate()
+            if NotchDrop.shared.enabled {
+                NotchDrop.shared.start()
+                // Lancée à l'ouverture de session : discrète, seule la zone de l'encoche est active.
+                if atLogin { NSApp.windows.filter { !($0 is NSPanel) }.forEach { $0.close() } }
+            }
         }
     }
     func application(_ application: NSApplication, open urls: [URL]) {
         Task { @MainActor in Converter.shared.receive(urls) }
     }
-    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        !UserDefaults.standard.bool(forKey: "notchEnabled")  // reste ouverte pour la zone de l'encoche
+    }
 }
 
 @main
