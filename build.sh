@@ -33,6 +33,25 @@ if [[ ! -x $CACHE/host/python/bin/python3 ]]; then
 fi
 HOST_PY=$CACHE/host/python/bin/python3
 
+# macOS 27 : @State devient une macro dont le module n'est livré qu'avec Xcode, pas avec les outils
+# gratuits (Command Line Tools). Dans ce cas on compile avec le plus récent SDK d'avant (macOS 26…),
+# que les outils 27 livrent encore. La déclaration est dans SwiftUICore ; le « / » final fait suivre
+# à grep le lien Modules.
+SDK=$(xcrun --show-sdk-path)
+PLUGINS=${$(xcrun -f swiftc):h:h}/lib/swift/host/plugins
+uses_state_macro() { grep -rqs "StateMacro" $1/System/Library/Frameworks/SwiftUI{,Core}.framework/Modules/ }
+if [[ ! -e $PLUGINS/libSwiftUIMacros.dylib ]] && uses_state_macro $SDK; then
+  SDK=""
+  for s in $(print -l $(xcode-select -p)/SDKs/MacOSX[0-9]*.sdk(N) | sort -rV); do
+    uses_state_macro $s || { SDK=$s; break; }
+  done
+  if [[ -z $SDK ]]; then
+    echo "✗ Pas de SDK compatible : installe Xcode depuis l'App Store, ouvre-le une fois,"
+    echo "  puis lance « sudo xcode-select -s /Applications/Xcode.app »."
+    exit 1
+  fi
+fi
+
 build_app() {  # $1 = arm64 | x86_64
   local arch=$1 app=build/$1/Convertisseur.app
   local res=$app/Contents/Resources
@@ -42,7 +61,7 @@ build_app() {  # $1 = arm64 | x86_64
   echo "→ Construction pour $arch…"
   rm -rf build/$arch && mkdir -p $app/Contents/MacOS $res
 
-  swiftc -O -parse-as-library -swift-version 5 -target $arch-apple-macos14 \
+  swiftc -O -parse-as-library -swift-version 5 -sdk $SDK -target $arch-apple-macos14 \
     app/*.swift -o $app/Contents/MacOS/Convertisseur 2>&1 | grep -E "error" || true
   [[ -x $app/Contents/MacOS/Convertisseur ]] || { echo "✗ La compilation a échoué"; exit 1; }
 
